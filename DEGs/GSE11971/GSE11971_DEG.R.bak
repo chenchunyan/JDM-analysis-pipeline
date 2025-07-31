@@ -1,0 +1,175 @@
+setwd("D:/BaiduSyncdisk/课题分析过程/青少年性皮肌炎/GSE11971")
+###############################1.读取文件夹下的CEL数据########################################
+library(affy)
+Data1 <- ReadAffy()
+pData(Data1)
+
+#############################2.修改样本名####################################################
+library(stringr)
+raw.names<-sampleNames(Data1)
+new<-str_split_fixed(raw.names, ".", 1)
+new.names<-new[,1]
+sampleNames(Data1)<-new.names
+pData(Data1)
+##############################3.用RMA算法进行预处理，最常用#########################################
+tum.rma <- rma(Data1) #对数据进行预处理
+
+#############################4.画箱线图和密度图进行质控######################
+library(limma)
+#做箱线图对比标准前后数据
+#设置颜色
+library(RColorBrewer)
+cols<-brewer.pal(8,"Set1")
+#做箱线图
+library(affyPLM)#做标准化后的图要载入affyPLM包，以便解析标准化后的数据
+boxplot(Data1,col=cols) #标准化之前的箱线图，就是刚读进去的CELL文件
+boxplot(tum.rma,col=cols) 
+#做密度曲线图
+hist(Data1,col=cols) #标准化之前的密度图
+hist(tum.rma,col=cols)#标rma准化之后的密度图
+#对单个芯片进行可视化
+> celfiles.qc<-fitPLM(Data1)
+> image(celfiles.qc,which=1,add.lenge=TRUE) #which的参数是看第一个样本的芯片，好的芯片上面大部分是背景，只有一点信号强，我这个数据很多芯片的非特异性信号有点强比如GSM2612193很多强的绿光
+> image(celfiles.qc,which=6,add.lenge=TRUE)
+
+##############################也可以用GCRMA算法进行预处理######################################### 这个数据用这个的结果
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("gcrma") #安装软件
+library(gcrma)
+tum.gcrma<-gcrma(Data1) #用GC-RMA算法进行标准化 可以试试不同的标准化方法找一个合适的,一翻墙网就好了，就运行成功了
+##########重复上面的分析画图进行质控####
+boxplot(tum.gcrma,col=cols) 
+#做密度曲线图
+hist(tum.gcrma,col=cols)#标rma准化之后的密度图
+####5.过滤探针
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+BiocManager::install("genefilter")
+library(genefilter)
+gcrma_filter<-nsFilter(tum.gcrma,require.entrez = FALSE,remove.dupEntrez = FALSE)
+gcrma_filter$filter.log
+$numLowVar
+[1] 27307
+
+$feature.exclude
+[1] 62
+##############################6.提取表达矩阵################################################
+#tum_exp <- exprs(tum.rma)
+gcrma_exp <- exprs(gcrma_filter$eset) #另一种标准化方法的
+pData(gcrma_filter$eset)
+# mean-variance trend 均值方差趋势图
+probes_expr <- na.omit(gcrma_exp)#eliminate rows with NAs
+plotSA(lmFit(probes_expr), main="Mean variance trend, GSE11971")
+##############################7.对矩阵的probe进行注释########################################
+library(tinyarray)
+library(GEOquery)
+GPL96 <- getGEO("GPL96",destdir = ".")
+ids <- GPL96@dataTable@table
+length(unique(ids$`Gene Symbol`)) 
+table(rownames(probes_expr) %in% ids$ID) # table(rownames(probes_expr) %in% ids$probe_id)
+
+data<-probes_expr[rownames(probes_expr) %in% ids$ID,]#去除了原始数据中未经注释的探针data<-gcrma_exp[rownames(tum_exp) %in% ids$probe_id,]
+dim(data)
+colnames(data) <- gsub("\\.CEL\\.gz", "", colnames(data)) #把列明中的.CEL.gz去掉
+colnames(data)
+ids<-ids[match(rownames(data),ids$ID),]
+tmp = by(data,ids$`Gene Symbol`,function(x) rownames(x)[which.max(rowMeans(x))] )
+probes<-as.character(tmp)
+data<-data[rownames(data) %in% probes,]
+ids<-ids[ids$ID %in% probes,]
+row.names(data)<-ids$`Gene Symbol`
+max(data)
+#下面只选择MDD和control的pd
+pd <- read.table("pd.txt",sep="\t",header=T,row.names = 1)
+id <- pd
+library(edgeR)
+library(ggplot2)
+library(dplyr)
+library(cluster)
+library(factoextra)
+#去除异常样本
+dist_data <- dist(data[, -ncol(data)], method = "euclidean")
+hclust_data <- hclust(dist_data, method = "ward.D2")
+clusters <- cutree(hclust_data, k = 3) # 这里假设聚类结果有3个簇
+cluster_heights <- aggregate(data, by = list(clusters), FUN = mean)# 计算每个簇的平均高度
+threshold <- 1.5 * IQR(cluster_heights$mean_height)# 找出超过1.5倍IQR的高度阈值
+outliers <- cluster_heights$clusters[cluster_heights$mean_height > threshold]# 找到离群样本的索引 #这个数据集中没有找到outlier的样本，就是不需要去除什么样本
+write.table(data,file="GSE11971_express.txt",sep="\t",quote = F,col.names = T)
+data_1 <- t(data)
+write.table(data_1,file="GSE11971_express_2.txt",sep="\t",quote = F,col.names = T)
+merged_data <- merge(data_1, pd, by.x = "row.names", by.y ="row.names", all.x = TRUE)
+#colnames(pd)[which(names(pd) == "source_name_ch1")] <- "tissue"
+subset_pd <- subset(pd, group %in% c("control", "JDM"))
+#Neutrophil_pd<-subset_pd[subset_pd$tissue=="neutrophil",]
+#PBMC_pd<-subset_pd[subset_pd$tissue=="PBMC",]
+#table(Neutrophil_pd$group)
+#table(PBMC_pd$group)
+#Neutrophil_data <- data[,rownames(Neutrophil_pd)]
+subset_data <- data[,rownames(subset_pd)]
+#merged_data <- merge(t(Neutrophil_data), Neutrophil_pd, by.x = "row.names", by.y = "geo_accession", all.x = TRUE)
+merged_data$group <- ifelse(merged_data$group == "control", 1, 2)
+write.table(merged_data,file="GSE11971_express_2.txt",sep="\t",quote = F,col.names = T)
+
+########limma做差异表达分析
+filtered_pd <- pd
+filtered_data <- subset_data
+group <- as.factor(filtered_pd$group)
+samplename<-rownames(filtered_pd)
+filtered_data <- data[, samplename] #提取需要的样本的表达数据
+design=model.matrix(~factor(group)) #这个模型构建的方法跟之前那个不一样
+fit=lmFit(filtered_data,design)
+fit=eBayes(fit)
+DEG=topTable(fit,coef=2,n=Inf)
+View(DEG)
+#####火山图
+df=DEG
+attach(df)
+df$v= -log10(P.Value)
+df$g=ifelse(df$P.Value>0.05,'No_sig',
+            ifelse( df$logFC >0.1,'up',
+                    ifelse( df$logFC < -0.1,'down','No_sig') )
+) #|logFC|>0.263 相当于FC>1.189 |logFC|>0.1 相当于 FC>1.258,前面一个条件应该更严格，为什么得到的差异表达基因比第二个条件更少，说可能因为数据质量或者是计算方法的原因
+table(df$g)
+#标注基因类型，只要蛋白编码基因
+genetype <- read.table("D:/depression-data/GSE102556/human_geneID_symbol.txt",header=TRUE,sep="\t")
+df$name=rownames(df)
+df$type <- genetype[match(df$name, genetype$Symbol), "Type"]
+library(dplyr)
+newdata <- df %>%
+  filter(type == "protein-coding")
+newdf <- newdata[,1:8]
+table(newdf$g)
+write.table(newdf,file="GSE11971_deg.txt",sep="\t",quote = F,col.names = T)
+#logFC排序
+newdf=newdf[order(newdf$logFC),]
+newdf=rbind(Gene=colnames(newdf),newdf)
+newdf <- newdf[,1:7]
+#重新导入计算Degs
+write.table(newdf,file="GSE11971_deg_RRA_input_format.txt",sep="\t",quote = F,col.names = T)#RobustRankAggreg (RRA)的输入文件
+
+head(df)
+library(ggpubr)
+newdf$name=rownames(newdf)
+ggpubr::ggscatter(df, x = "logFC", y = "v", color = "g",size = 0.5,
+                  label = "name", repel = T,
+                  label.select =head(rownames(df)), #c("CD6","SNORA61","CFD"), 可以自己指定显示的基因名字，这个火山图修改一下也挺好看的
+                  palette = c("#00AFBB", "#E7B800", "#FC4E07") )
+detach(df)
+#分组热图
+x=DEG$logFC
+names(x)=rownames(DEG)
+cg=c(names(head(sort(x),100)),
+     names(tail(sort(x),100)))  #用前一百个和后一百个基因画的热图 cg=names(tail(sort(apply(filtered_data,1,sd)),1000)) 筛选方差最大的1000个基因画图
+cg
+library(pheatmap)
+n=t(scale(t(filtered_data[cg,])))
+n[n>2]=2
+n[n< -2]= -2
+n[1:4,1:4]
+ac=data.frame(groupList=group)
+rownames(ac)=colnames(n)  
+pheatmap(n,show_colnames =F,show_rownames = F,
+         annotation_col=ac)
+#看这个热图，其实对照和疾病分的并不是很好，很多没有分开，所以DEGs才那么少
